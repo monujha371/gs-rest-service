@@ -10,15 +10,12 @@ pipeline {
   }
 
   stages {
-
     stage('Checkout') {
       steps {
-        // Use the same repo Jenkins used to fetch this Jenkinsfile
         checkout scm
         sh '''
           echo "Repo: $(git remote get-url origin)"
           echo "Commit: $(git rev-parse --short HEAD)"
-          echo "Workspace content:"
           ls -la
         '''
       }
@@ -43,7 +40,6 @@ pipeline {
       }
       post {
         always {
-          // Collect tests even if they fail
           junit testResults: 'complete/target/surefire-reports/*.xml', allowEmptyResults: true
         }
       }
@@ -73,19 +69,25 @@ pipeline {
       steps {
         dir('complete') {
           script {
-            // Detect the built jar
+            // Find the built JAR
             def jar = sh(script: "ls target/*.jar 2>/dev/null | head -n 1", returnStdout: true).trim()
             if (!jar) {
-              error "No JAR found in complete/target/. Make sure Maven packaging produced a jar."
+              error "No JAR found in complete/target/. Ensure packaging produced a jar."
             }
             echo "Found JAR: ${jar}"
 
-            // Build the Docker image using Dockerfile in 'complete' directory
+            // OPTION A: Escape the shell dollar for command substitution
             sh """
               docker build \
-                --build-arg APP_JAR=$(basename ${jar}) \
+                --build-arg APP_JAR=\\\$(basename ${jar}) \
                 -t ${ECR_REPO}:${IMAGE_TAG} .
             """
+
+            // OPTION B (preferred): Compute basename in Groovy to avoid $() entirely
+            // def appJarName = sh(script: "basename ${jar}", returnStdout: true).trim()
+            // sh """
+            //   docker build --build-arg APP_JAR=${appJarName} -t ${ECR_REPO}:${IMAGE_TAG} .
+            // """
           }
         }
       }
@@ -116,7 +118,6 @@ pipeline {
 
   post {
     always {
-      // Optional cleanup and artifact collection
       sh 'docker image prune -f || true'
       archiveArtifacts artifacts: 'complete/target/*.jar', allowEmptyArchive: true
       cleanWs()
