@@ -14,18 +14,20 @@ pipeline {
     stage('Checkout') {
       steps {
         checkout scm
-        sh '''
-          echo "Repo: $(git remote get-url origin)"
-          echo "Commit: $(git rev-parse --short HEAD)"
-          echo "Workspace content:"
-          ls -la
-        '''
+        script {
+          def repoUrl   = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+          def commitSha = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          echo "Repo: ${repoUrl}"
+          echo "Commit: ${commitSha}"
+        }
+        sh 'ls -la'
       }
     }
 
     stage('Build & Test (Maven)') {
       steps {
         dir('complete') {
+          // Use mvnw if present, otherwise system mvn
           sh '''
             set -e
             if [ -f mvnw ]; then
@@ -42,7 +44,6 @@ pipeline {
       }
       post {
         always {
-          // Collect tests even if they fail
           junit testResults: 'complete/target/surefire-reports/*.xml', allowEmptyResults: true
         }
       }
@@ -72,22 +73,18 @@ pipeline {
       steps {
         dir('complete') {
           script {
-            // Find the built JAR
-            def jar = sh(script: "ls target/*.jar 2>/dev/null | head -n 1", returnStdout: true).trim()
+            // Find the built JAR (no shell $() used)
+            def jar = sh(script: 'ls target/*.jar 2>/dev/null | head -n 1', returnStdout: true).trim()
             if (!jar) {
-              error "No JAR found in complete/target/. Ensure packaging produced a jar."
+              error "No JAR found in complete/target/. Ensure Maven packaging produced a jar."
             }
             echo "Found JAR: ${jar}"
 
-            // Compute basename in Groovy (avoids $() issues)
+            // Compute basename in Groovy to avoid shell substitutions entirely
             def appJarName = sh(script: "basename ${jar}", returnStdout: true).trim()
 
             // Build the Docker image
-            sh """
-              docker build \
-                --build-arg APP_JAR=${appJarName} \
-                -t ${ECR_REPO}:${IMAGE_TAG} .
-            """
+            sh "docker build --build-arg APP_JAR=${appJarName} -t ${env.ECR_REPO}:${env.IMAGE_TAG} ."
           }
         }
       }
@@ -95,16 +92,25 @@ pipeline {
 
     stage('Login to ECR') {
       steps {
-        sh """
-          aws --version || echo 'AWS CLI not found in PATH'
-          aws ecr get-login-password --region ${AWS_REGION} \
-            | docker login --username AWS --password-stdin \
-              ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-        """
+        // Uses Groovy interpolation; no shell $ variables inside strings
+        sh "aws ecr get-login-password --region ${env.AWS_REGION} | docker login --username AWS --password-stdin ${env.ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
       }
     }
 
     stage('Tag & Push Image') {
       steps {
-        sh """
+        sh "docker tag ${env.ECR_REPO}:${env.IMAGE_TAG} ${env.ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${env.ECR_REPO}:${env.IMAGE_TAG}"
+        sh "docker push ${env.ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${env.ECR_REPO}:${env.IMAGE_TAG}"
+      }
+    }
+  }
+
+  post {
+    always {
+      sh 'docker image prune -f || true'
+      archiveArtifacts artifacts: 'complete/target/*.jar', allowEmptyArchive: true
+      cleanWs()
+    }
+  }
+}
 
