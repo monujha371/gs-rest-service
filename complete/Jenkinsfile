@@ -10,14 +10,15 @@ pipeline {
   }
 
   stages {
+
     stage('Checkout') {
       steps {
         // Use the same repo Jenkins used to fetch this Jenkinsfile
         checkout scm
-        // Diagnostics to prove which repo/commit was checked out
         sh '''
           echo "Repo: $(git remote get-url origin)"
           echo "Commit: $(git rev-parse --short HEAD)"
+          echo "Workspace content:"
           ls -la
         '''
       }
@@ -26,12 +27,23 @@ pipeline {
     stage('Build & Test (Maven)') {
       steps {
         dir('complete') {
-          sh 'chmod +x mvnw'
-          sh './mvnw -B clean test'
+          sh '''
+            set -e
+            if [ -f mvnw ]; then
+              chmod +x mvnw
+              ./mvnw -B -v
+              ./mvnw -B clean test
+            else
+              echo "mvnw not found; using system Maven"
+              mvn -v
+              mvn -B clean test
+            fi
+          '''
         }
       }
       post {
         always {
+          // Collect tests even if they fail
           junit testResults: 'complete/target/surefire-reports/*.xml', allowEmptyResults: true
         }
       }
@@ -40,7 +52,14 @@ pipeline {
     stage('Package') {
       steps {
         dir('complete') {
-          sh './mvnw -B package'
+          sh '''
+            set -e
+            if [ -f mvnw ]; then
+              ./mvnw -B package -DskipTests
+            else
+              mvn -B package -DskipTests
+            fi
+          '''
         }
       }
       post {
@@ -53,36 +72,55 @@ pipeline {
     stage('Build Docker Image') {
       steps {
         dir('complete') {
-          sh 'docker build -t ${ECR_REPO}:${IMAGE_TAG} .'
+          script {
+            // Detect the built jar
+            def jar = sh(script: "ls target/*.jar 2>/dev/null | head -n 1", returnStdout: true).trim()
+            if (!jar) {
+              error "No JAR found in complete/target/. Make sure Maven packaging produced a jar."
+            }
+            echo "Found JAR: ${jar}"
+
+            // Build the Docker image using Dockerfile in 'complete' directory
+            sh """
+              docker build \
+                --build-arg APP_JAR=$(basename ${jar}) \
+                -t ${ECR_REPO}:${IMAGE_TAG} .
+            """
+          }
         }
       }
     }
 
     stage('Login to ECR') {
       steps {
-        sh '''
+        sh """
+          aws --version || echo 'AWS CLI not found in PATH'
           aws ecr get-login-password --region ${AWS_REGION} \
-          | docker login --username AWS --password-stdin \
-            ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-        '''
+            | docker login --username AWS --password-stdin \
+              ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+        """
       }
     }
 
     stage('Tag & Push Image') {
       steps {
-        sh '''
+        sh """
           docker tag ${ECR_REPO}:${IMAGE_TAG} \
             ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}
 
-          docker push \
-            ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}
-        '''
+          docker push ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}
+        """
       }
     }
   }
 
   post {
-    always { cleanWs() }
+    always {
+      // Optional cleanup and artifact collection
+      sh 'docker image prune -f || true'
+      archiveArtifacts artifacts: 'complete/target/*.jar', allowEmptyArchive: true
+      cleanWs()
+    }
   }
 }
 
