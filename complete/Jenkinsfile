@@ -10,12 +10,14 @@ pipeline {
   }
 
   stages {
+
     stage('Checkout') {
       steps {
         checkout scm
         sh '''
           echo "Repo: $(git remote get-url origin)"
           echo "Commit: $(git rev-parse --short HEAD)"
+          echo "Workspace content:"
           ls -la
         '''
       }
@@ -40,6 +42,7 @@ pipeline {
       }
       post {
         always {
+          // Collect tests even if they fail
           junit testResults: 'complete/target/surefire-reports/*.xml', allowEmptyResults: true
         }
       }
@@ -76,18 +79,15 @@ pipeline {
             }
             echo "Found JAR: ${jar}"
 
-            // OPTION A: Escape the shell dollar for command substitution
+            // Compute basename in Groovy (avoids $() issues)
+            def appJarName = sh(script: "basename ${jar}", returnStdout: true).trim()
+
+            // Build the Docker image
             sh """
               docker build \
-                --build-arg APP_JAR=\\\$(basename ${jar}) \
+                --build-arg APP_JAR=${appJarName} \
                 -t ${ECR_REPO}:${IMAGE_TAG} .
             """
-
-            // OPTION B (preferred): Compute basename in Groovy to avoid $() entirely
-            // def appJarName = sh(script: "basename ${jar}", returnStdout: true).trim()
-            // sh """
-            //   docker build --build-arg APP_JAR=${appJarName} -t ${ECR_REPO}:${IMAGE_TAG} .
-            // """
           }
         }
       }
@@ -107,21 +107,4 @@ pipeline {
     stage('Tag & Push Image') {
       steps {
         sh """
-          docker tag ${ECR_REPO}:${IMAGE_TAG} \
-            ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}
-
-          docker push ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}
-        """
-      }
-    }
-  }
-
-  post {
-    always {
-      sh 'docker image prune -f || true'
-      archiveArtifacts artifacts: 'complete/target/*.jar', allowEmptyArchive: true
-      cleanWs()
-    }
-  }
-}
 
